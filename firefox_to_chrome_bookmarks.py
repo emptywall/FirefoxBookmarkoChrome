@@ -207,12 +207,13 @@ def extract_firefox_bookmarks(places_db_path):
 def convert_firefox_to_chrome(firefox_bookmark_tree, next_chrome_id=1):
     """
     将 Firefox 书签树转换为 Chrome 格式
-    Firefox 特殊文件夹 ID:
-    - 1: 根节点
-    - 2: 书签栏 (Bookmarks Toolbar) -> Chrome 的 bookmark_bar
-    - 3: 书签菜单 (Bookmarks Menu) -> Chrome 的 other
-    - 4: 未排序书签 (Unsorted Bookmarks) -> Chrome 的 other
-    - 5: 移动设备书签 (Mobile Bookmarks) -> Chrome 的 synced
+    
+    Firefox 特殊文件夹 (根据 title 判断，而不是固定 ID):
+    - "toolbar": 书签栏 (Bookmarks Toolbar) -> Chrome 的 bookmark_bar
+    - "menu": 书签菜单 (Bookmarks Menu) -> Chrome 的 other
+    - "unfiled": 未排序书签 (Unsorted Bookmarks) -> Chrome 的 other
+    - "mobile": 移动设备书签 (Mobile Bookmarks) -> Chrome 的 synced
+    - "tags": 标签 (忽略，不是书签文件夹)
     """
     chrome_roots = {
         'bookmark_bar': {
@@ -280,38 +281,52 @@ def convert_firefox_to_chrome(firefox_bookmark_tree, next_chrome_id=1):
         
         return chrome_node
     
-    # 处理 Firefox 的特殊文件夹
-    # 2: 书签栏 -> Chrome 的 bookmark_bar
-    if 2 in firefox_bookmark_tree:
-        toolbar_bookmarks = firefox_bookmark_tree[2]
-        for child in toolbar_bookmarks['children']:
-            child_node = convert_node(child, 0)
-            if child_node:
-                chrome_roots['bookmark_bar']['children'].append(child_node)
-    
-    # 3: 书签菜单 -> Chrome 的 other
-    if 3 in firefox_bookmark_tree:
-        menu_bookmarks = firefox_bookmark_tree[3]
-        for child in menu_bookmarks['children']:
-            child_node = convert_node(child, 0)
-            if child_node:
-                chrome_roots['other']['children'].append(child_node)
-    
-    # 4: 未排序书签 -> Chrome 的 other
-    if 4 in firefox_bookmark_tree:
-        unsorted_bookmarks = firefox_bookmark_tree[4]
-        for child in unsorted_bookmarks['children']:
-            child_node = convert_node(child, 0)
-            if child_node:
-                chrome_roots['other']['children'].append(child_node)
-    
-    # 5: 移动设备书签 -> Chrome 的 synced
-    if 5 in firefox_bookmark_tree:
-        mobile_bookmarks = firefox_bookmark_tree[5]
-        for child in mobile_bookmarks['children']:
-            child_node = convert_node(child, 0)
-            if child_node:
-                chrome_roots['synced']['children'].append(child_node)
+    # 遍历所有书签节点，查找特殊文件夹
+    # 根据 title 判断特殊文件夹类型，而不是固定 ID
+    for bookmark_id, bookmark_node in firefox_bookmark_tree.items():
+        title = bookmark_node.get('title', '')
+        
+        # 跳过根节点 (parent=0) 和非文件夹节点
+        if bookmark_node['parent'] == 0 or bookmark_node['type'] != 2:
+            continue
+        
+        # 根据 title 判断特殊文件夹类型
+        if title == 'toolbar':
+            # 书签栏 -> Chrome 的 bookmark_bar
+            print(f"    找到书签栏 (toolbar)，包含 {len(bookmark_node['children'])} 个项目")
+            for child in bookmark_node['children']:
+                child_node = convert_node(child, 0)
+                if child_node:
+                    chrome_roots['bookmark_bar']['children'].append(child_node)
+        
+        elif title == 'menu':
+            # 书签菜单 -> Chrome 的 other
+            print(f"    找到书签菜单 (menu)，包含 {len(bookmark_node['children'])} 个项目")
+            for child in bookmark_node['children']:
+                child_node = convert_node(child, 0)
+                if child_node:
+                    chrome_roots['other']['children'].append(child_node)
+        
+        elif title == 'unfiled':
+            # 未排序书签 -> Chrome 的 other
+            print(f"    找到未排序书签 (unfiled)，包含 {len(bookmark_node['children'])} 个项目")
+            for child in bookmark_node['children']:
+                child_node = convert_node(child, 0)
+                if child_node:
+                    chrome_roots['other']['children'].append(child_node)
+        
+        elif title == 'mobile':
+            # 移动设备书签 -> Chrome 的 synced
+            print(f"    找到移动设备书签 (mobile)，包含 {len(bookmark_node['children'])} 个项目")
+            for child in bookmark_node['children']:
+                child_node = convert_node(child, 0)
+                if child_node:
+                    chrome_roots['synced']['children'].append(child_node)
+        
+        elif title == 'tags':
+            # 标签文件夹，忽略
+            print(f"    找到标签文件夹 (tags)，忽略")
+            continue
     
     # 设置根文件夹的 ID
     # 通常 Chrome 的 bookmark_bar id 是 1, other 是 2, synced 是 3
