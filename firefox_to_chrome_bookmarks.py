@@ -33,24 +33,28 @@ def get_firefox_profile_path():
     if not os.path.exists(firefox_profiles_path):
         raise Exception(f"Firefox 配置文件路径不存在: {firefox_profiles_path}")
     
-    # 查找默认配置文件（通常以 .default-release 结尾）
+    # 查找所有配置文件目录
     profiles = [d for d in os.listdir(firefox_profiles_path) if os.path.isdir(os.path.join(firefox_profiles_path, d))]
     
-    # 优先选择 .default-release 结尾的配置文件
-    default_profiles = [p for p in profiles if p.endswith('.default-release')]
-    if default_profiles:
-        return os.path.join(firefox_profiles_path, default_profiles[0])
+    if not profiles:
+        raise Exception("未找到 Firefox 配置文件目录")
     
-    # 如果没有 .default-release，选择 .default 结尾的
-    default_profiles = [p for p in profiles if p.endswith('.default')]
-    if default_profiles:
-        return os.path.join(firefox_profiles_path, default_profiles[0])
+    # 筛选出包含 places.sqlite 文件的配置文件
+    valid_profiles = []
+    for profile in profiles:
+        profile_path = os.path.join(firefox_profiles_path, profile)
+        places_db_path = os.path.join(profile_path, 'places.sqlite')
+        if os.path.exists(places_db_path):
+            # 获取 places.sqlite 的修改时间
+            mtime = os.path.getmtime(places_db_path)
+            valid_profiles.append((profile_path, mtime))
     
-    # 如果都没有，返回第一个配置文件
-    if profiles:
-        return os.path.join(firefox_profiles_path, profiles[0])
+    if not valid_profiles:
+        raise Exception("未找到包含书签数据库的 Firefox 配置文件")
     
-    raise Exception("未找到 Firefox 配置文件")
+    # 按修改时间排序，选择最新的配置文件
+    valid_profiles.sort(key=lambda x: x[1], reverse=True)
+    return valid_profiles[0][0]
 
 
 def get_chrome_bookmarks_path():
@@ -81,64 +85,121 @@ def extract_firefox_bookmarks(places_db_path):
     if not os.path.exists(places_db_path):
         raise Exception(f"Firefox 书签数据库不存在: {places_db_path}")
     
-    conn = sqlite3.connect(places_db_path)
-    cursor = conn.cursor()
+    # 复制数据库文件到临时位置，避免 Firefox 运行时文件被锁定
+    import tempfile
+    temp_dir = tempfile.gettempdir()
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    temp_db_path = os.path.join(temp_dir, f'firefox_places_{timestamp}.sqlite')
+    temp_db_shm_path = f"{temp_db_path}-shm"
+    temp_db_wal_path = f"{temp_db_path}-wal"
     
-    # Firefox 书签的特殊文件夹 ID
-    # 1: 根节点
-    # 2: 书签栏 (Bookmarks Toolbar)
-    # 3: 书签菜单 (Bookmarks Menu)
-    # 4: 未排序书签 (Unsorted Bookmarks)
-    # 5: 移动设备书签 (Mobile Bookmarks)
-    
-    # 首先获取所有书签的基本信息
-    cursor.execute("""
-        SELECT 
-            b.id, 
-            b.parent, 
-            b.type, 
-            b.fk, 
-            b.title, 
-            b.position,
-            b.dateAdded,
-            b.lastModified,
-            p.url
-        FROM moz_bookmarks b
-        LEFT JOIN moz_places p ON b.fk = p.id
-        ORDER BY b.parent, b.position
-    """)
-    
-    bookmarks = cursor.fetchall()
-    conn.close()
-    
-    # 构建书签树
-    bookmark_tree = {}
-    for bookmark in bookmarks:
-        bookmark_id, parent, bookmark_type, fk, title, position, date_added, last_modified, url = bookmark
+    try:
+        # 复制主数据库文件
+        shutil.copy2(places_db_path, temp_db_path)
+        print(f"    已复制数据库到临时文件: {temp_db_path}")
         
-        if bookmark_id not in bookmark_tree:
-            bookmark_tree[bookmark_id] = {
-                'id': bookmark_id,
-                'parent': parent,
-                'type': bookmark_type,
-                'fk': fk,
-                'title': title,
-                'position': position,
-                'dateAdded': date_added,
-                'lastModified': last_modified,
-                'url': url,
-                'children': []
-            }
+        # 尝试复制相关的 WAL 和 SHM 文件（如果存在）
+        places_db_shm_path = f"{places_db_path}-shm"
+        places_db_wal_path = f"{places_db_path}-wal"
+        
+        if os.path.exists(places_db_shm_path):
+            try:
+                shutil.copy2(places_db_shm_path, temp_db_shm_path)
+                print(f"    已复制 SHM 文件到临时文件: {temp_db_shm_path}")
+            except Exception as e:
+                print(f"    警告: 无法复制 SHM 文件: {e}")
+        
+        if os.path.exists(places_db_wal_path):
+            try:
+                shutil.copy2(places_db_wal_path, temp_db_wal_path)
+                print(f"    已复制 WAL 文件到临时文件: {temp_db_wal_path}")
+            except Exception as e:
+                print(f"    警告: 无法复制 WAL 文件: {e}")
+                
+    except Exception as e:
+        raise Exception(f"无法复制 Firefox 书签数据库。请确保 Firefox 浏览器已关闭，然后重试。\n错误详情: {e}")
     
-    # 构建父子关系
-    for bookmark_id, bookmark in bookmark_tree.items():
-        parent_id = bookmark['parent']
-        if parent_id in bookmark_tree and parent_id != bookmark_id:
-            bookmark_tree[parent_id]['children'].append(bookmark)
+    bookmark_tree = None
+    conn = None
     
-    # 按位置排序子节点
-    for bookmark_id, bookmark in bookmark_tree.items():
-        bookmark['children'].sort(key=lambda x: x['position'])
+    try:
+        # 从临时文件读取
+        conn = sqlite3.connect(temp_db_path)
+        cursor = conn.cursor()
+        
+        # Firefox 书签的特殊文件夹 ID
+        # 1: 根节点
+        # 2: 书签栏 (Bookmarks Toolbar)
+        # 3: 书签菜单 (Bookmarks Menu)
+        # 4: 未排序书签 (Unsorted Bookmarks)
+        # 5: 移动设备书签 (Mobile Bookmarks)
+        
+        # 首先获取所有书签的基本信息
+        cursor.execute("""
+            SELECT 
+                b.id, 
+                b.parent, 
+                b.type, 
+                b.fk, 
+                b.title, 
+                b.position,
+                b.dateAdded,
+                b.lastModified,
+                p.url
+            FROM moz_bookmarks b
+            LEFT JOIN moz_places p ON b.fk = p.id
+            ORDER BY b.parent, b.position
+        """)
+        
+        bookmarks = cursor.fetchall()
+        
+        # 构建书签树
+        bookmark_tree = {}
+        for bookmark in bookmarks:
+            bookmark_id, parent, bookmark_type, fk, title, position, date_added, last_modified, url = bookmark
+            
+            if bookmark_id not in bookmark_tree:
+                bookmark_tree[bookmark_id] = {
+                    'id': bookmark_id,
+                    'parent': parent,
+                    'type': bookmark_type,
+                    'fk': fk,
+                    'title': title,
+                    'position': position,
+                    'dateAdded': date_added,
+                    'lastModified': last_modified,
+                    'url': url,
+                    'children': []
+                }
+        
+        # 构建父子关系
+        for bookmark_id, bookmark in bookmark_tree.items():
+            parent_id = bookmark['parent']
+            if parent_id in bookmark_tree and parent_id != bookmark_id:
+                bookmark_tree[parent_id]['children'].append(bookmark)
+        
+        # 按位置排序子节点
+        for bookmark_id, bookmark in bookmark_tree.items():
+            bookmark['children'].sort(key=lambda x: x['position'])
+            
+    except Exception as e:
+        raise Exception(f"读取 Firefox 书签数据库失败: {e}")
+    finally:
+        # 关闭数据库连接
+        if conn:
+            conn.close()
+        
+        # 清理临时文件
+        try:
+            if os.path.exists(temp_db_path):
+                os.remove(temp_db_path)
+                print(f"    已清理临时数据库文件: {temp_db_path}")
+            if os.path.exists(temp_db_shm_path):
+                os.remove(temp_db_shm_path)
+            if os.path.exists(temp_db_wal_path):
+                os.remove(temp_db_wal_path)
+        except Exception as e:
+            print(f"    警告: 清理临时文件失败: {e}")
     
     return bookmark_tree
 
